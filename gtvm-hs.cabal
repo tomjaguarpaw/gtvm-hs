@@ -55,6 +55,7 @@ library
     , symparsec >=1.1.1 && <1.2
     , text >=2.0.1 && <2.2
     , yaml >=0.11.11.2 && <0.12
+    , bluefin >= 0.0.9.0
   default-language: GHC2021
 
 executable gtvm-hs

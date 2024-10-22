@@ -42,6 +42,12 @@ import Data.Yaml qualified as Yaml
 import GHC.Generics ( Generic )
 import Data.String ( IsString )
 
+import Bluefin.Eff
+import Bluefin.Compound
+import Bluefin.State qualified as Bf
+import Bluefin.Stream qualified as Bf
+import Bluefin.IO qualified as Bf
+
 newtype ScpId = ScpId { getScpId :: Text }
     deriving (Eq, IsString) via Text
     deriving stock Show
@@ -82,6 +88,12 @@ data Studio m a where
 
 makeSem ''Studio
 
+data StudioBf e = MkStudioBf {
+  writeTlBf :: TLSeg' -> Eff e (),
+  readTlBf :: Eff e (Maybe TLSeg'),
+  loadScpBf :: ScpId -> Eff e ()
+  }
+
 -- | Resets and steps to the translation target SCP command with the requested
 --   index.
 --
@@ -113,6 +125,42 @@ setAt i a ls
     go 0 (_:xs) = a : xs
     go n (x:xs) = x : go (n-1) xs
     go _ []     = []
+
+runStudioBf
+    :: (e1 :> es, e2 :> es, e3 :> es) =>
+       Path Abs Dir
+    -> Bf.State St e1
+    -> Bf.Stream Text e2
+    -> Bf.IOE e3
+    -> (forall e. StudioBf e -> Eff (e :& es) r)
+    -> Eff es r
+runStudioBf baseDir stst op io k =
+  useImplIn k MkStudioBf {
+    writeTlBf = \tlseg -> do
+        st <- Bf.get stst
+        case stScptl st of
+          Nothing ->
+            Bf.yield op "no SCPTL loaded, can't write segment TL"
+          Just scptl -> do
+            let scptl' = setAt (stScptlIdx st) tlseg scptl
+            Bf.put stst st { stScptl = Just scptl' },
+    readTlBf = do
+        st <- Bf.get stst
+        case stScptl st of
+          Nothing -> do
+            Bf.yield op "no SCPTL loaded, can't read current segment TL"
+            pure Nothing
+          Just scptl ->
+            let tlSeg = scptl !! stScptlIdx st
+            in  if tlSegIsEmpty tlSeg then pure Nothing else pure (Just tlSeg),
+    loadScpBf = \scpId -> do
+        scpFName <- Bf.effIO io (studioYamlRes ".scp" $ getScpId scpId)
+        let scpFPath = $(Path.mkRelDir "scp") </> scpFName
+            fpath = baseDir </> scpFPath
+            fpath' = Path.fromAbsFile fpath
+        scp <- Bf.effIO io (Yaml.decodeFileThrow fpath')
+        Bf.modify stst $ \st -> st { stScpIdx = 0, stScp = scp, stScpId = scpId }
+    }
 
 runStudio
     :: Members '[State St, Output Text, Embed IO] r
